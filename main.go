@@ -22,9 +22,8 @@ func isDiskRunningForNoReason(disk string, timeout int) (beingWasteful bool) {
 }
 
 func spinDiskDown(disk string) (err error) {
-	cmd := exec.Command("ls")
-	err = cmd.Run()
-
+	cmd := exec.Command("hdparm", "-y", "/dev/"+disk)
+	_, err = cmd.CombinedOutput()
 	return
 }
 
@@ -34,7 +33,11 @@ func main() {
 	fmt.Println("Starting")
 	beingWasteful := isDiskRunningForNoReason(disk, timeout)
 	if beingWasteful {
-		spinDiskDown(disk)
+		err := spinDiskDown(disk)
+		if err != nil {
+			fmt.Println("Problem trying to spin disk down.")
+		}
+		fmt.Println("Disk spun down.")
 	}
 	fmt.Println("Done")
 }
