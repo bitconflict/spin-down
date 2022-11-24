@@ -63,7 +63,7 @@ func spinDiskDown(disk string) (err error) {
 
 func main() {
 	disk, timeout := parseArgs()
-	fmt.Println("Starting")
+	fmt.Printf("Selected disk is %v and setting timeout to be %v \n", disk, timeout)
 	beingWasteful := isDiskRunningForNoReason(disk, timeout)
 	if beingWasteful {
 		err := spinDiskDown(disk)
