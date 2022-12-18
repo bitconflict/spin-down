@@ -2,12 +2,19 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
+
+type State struct {
+	Disk string
+	IO   int
+}
 
 func parseArgs() (disk string, timeout int) {
 	diskPtr := flag.String("disk", "sda", "Disk name under /dev")
@@ -18,60 +25,85 @@ func parseArgs() (disk string, timeout int) {
 	return
 }
 
-func getDiskIOTime(disk string) (iotime string, err error) {
+func getDiskIOTime(disk string) (iotime int, err error) {
 	file, err := os.Open("/proc/diskstats")
-	if err == nil {
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			currentLine := scanner.Text()
-			str_arr := strings.Split(currentLine, " ")
-			disk_str := str_arr[11]
-			if disk_str == disk {
-				iotime = str_arr[22]
-				break
-			}
+	if err != nil {
+		fmt.Println("Error opening diskstats")
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		currentLine := scanner.Text()
+		str_arr := strings.Split(currentLine, " ")
+		disk_str := str_arr[11]
+		if disk_str == disk {
+			iotime, err = strconv.Atoi(str_arr[22])
+			break
 		}
 	}
-	defer file.Close()
 	return iotime, err
 }
-func getPreviousIOTime(disk string) (iotime string) {
-	file, err := os.Open("/tmp/spin-down-data")
+
+func getPreviousIOTime(disk string, state *State) (iotime int, err error) {
+	// text_buffer := make([]byte, 6)
+	content, err := os.ReadFile("/tmp/spin-down-data.json")
 	if err != nil {
-		fmt.Printf("failed to open data file with error: %v", err)
+		fmt.Printf("Failed to read state file with error %v", iotime)
 	}
-	defer file.Close()
-	text_buffer := make([]byte, 6)
-	_, err = file.Read(text_buffer)
+	// Unmarshal the dataiotime = state.IO
+	err = json.Unmarshal(content, &state)
 	if err != nil {
-		fmt.Printf("Failed to read file with error %v", iotime)
+		fmt.Printf("Error reading state file with error: %v \n", err)
 	}
-	// text_buffer = []byte(strings.TrimSpace())
-	// res := bytes.TrimSpace(text_buffer)
-	iotime = string(text_buffer)
-	// iotime = strings.TrimSpace(iotime)
+	fmt.Printf("Current disk is %s , prev disk is %s \n", disk, state.Disk)
+	if disk == state.Disk {
+		iotime = state.IO
+		err = nil
+	} else {
+		err = fmt.Errorf("failed to find state for disk %s", disk)
+	}
 	return
 }
 
-func writeCurrentIOTime(disk string, currentIOTime string) (err error) {
-	os.WriteFile("/tmp/spin-down-data", []byte(currentIOTime), 0777)
+func writeCurrentIOTime(state *State) (err error) {
+	content, err := json.Marshal(state)
+	if err != nil {
+		fmt.Println("Error marshaling data")
+	}
+	os.WriteFile("/tmp/spin-down-data.json", content, 0777)
 	return
 }
 
-func isDiskRunningForNoReason(disk string) (beingWasteful bool) {
+func isDiskRunningForNoReason(disk string) (beingWasteful bool, err error) {
 	beingWasteful = false
-	currentIOTime, err := getDiskIOTime(disk)
+	err = nil
+	var currentIOTime int
+	currentIOTime, err = getDiskIOTime(disk)
 	if err != nil {
 		fmt.Println("Couldn't read diskIOTime")
+		return
 	}
-	fmt.Printf("current io %s \n", currentIOTime)
-	previousIOTime := getPreviousIOTime(disk)
-	fmt.Printf("previous io %s \n", previousIOTime)
-	fmt.Printf("Lengths of both strings are %d and %d \n", len(currentIOTime), len(previousIOTime))
-	if currentIOTime == previousIOTime {
+	var previousState State
+	var currentState State
+	var previousIOTime int
+	previousIOTime, err = getPreviousIOTime(disk, &previousState)
+	if err != nil {
+		fmt.Printf("Ran into an error getting previous IO Time with error: %s \n", err)
+		currentState.Disk = disk
+		currentState.IO = currentIOTime
+		disk_err := writeCurrentIOTime(&currentState)
+		if disk_err != nil {
+			fmt.Printf("Failed to write file with error %v", err)
+		}
+		return
+	}
+	fmt.Printf("Values of both IO times are %d and %d \n", currentIOTime, previousIOTime)
+	if currentIOTime == previousIOTime && currentIOTime != 0 {
 		beingWasteful = true
 	} else {
-		err = writeCurrentIOTime(disk, fmt.Sprint(currentIOTime))
+		currentState.Disk = disk
+		currentState.IO = currentIOTime
+		err = writeCurrentIOTime(&currentState)
 		if err != nil {
 			fmt.Printf("Failed to write file with error %v", err)
 		}
@@ -80,16 +112,46 @@ func isDiskRunningForNoReason(disk string) (beingWasteful bool) {
 }
 
 func spinDiskDown(disk string) (err error) {
-	// cmd := exec.Command("hdparm", "-y", "/dev/"+disk)
-	cmd := exec.Command("echo", "hdparm spun down")
-	_, err = cmd.CombinedOutput()
+	cmd := exec.Command("hdparm", "-y", "/dev/"+disk)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Println("Error running hdparm command")
+	}
+	fmt.Println(string(output[:]))
+	return
+}
+
+func isDiskCurrentlySpinning(disk string) (spinning bool, err error) {
+	spinning = true
+	cmd := exec.Command("hdparm", "-C", "/dev/"+disk)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Println("Error running hdparm status command")
+	}
+	string_output := string(output[:])
+	fmt.Println(string_output)
+	if strings.Contains(string_output, "standby") {
+		spinning = false
+	}
 	return
 }
 
 func main() {
 	disk, timeout := parseArgs()
 	fmt.Printf("Selected disk is %v and setting timeout to be %v \n", disk, timeout)
-	beingWasteful := isDiskRunningForNoReason(disk)
+	isDiskOn, err := isDiskCurrentlySpinning(disk)
+	if err != nil {
+		fmt.Printf("Failed to check current disk status with error: %v", err)
+	}
+	if !isDiskOn {
+		fmt.Println("Disk is already inactive. Exiting")
+		return
+	}
+	beingWasteful, err := isDiskRunningForNoReason(disk)
+	if err != nil {
+		fmt.Printf("Ran into an error checking if disk is running for no reason with error: %s \n", err)
+		return
+	}
 	if beingWasteful {
 		err := spinDiskDown(disk)
 		if err != nil {
@@ -97,6 +159,6 @@ func main() {
 		}
 		fmt.Println("Disk spun down.")
 	} else {
-		fmt.Println("Disk is active. No action taken.")
+		fmt.Println("Not being wasteful. No action taken.")
 	}
 }
