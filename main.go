@@ -98,7 +98,9 @@ func isDiskRunningForNoReason(disk string) (beingWasteful bool, err error) {
 		return
 	}
 	fmt.Printf("Values of both IO times are %d and %d \n", currentIOTime, previousIOTime)
-	if currentIOTime == previousIOTime && currentIOTime != 0 {
+	disk_sparingly_used := (currentIOTime - previousIOTime) < 20
+	is_dist_initialized := currentIOTime != 0
+	if disk_sparingly_used && is_dist_initialized {
 		beingWasteful = true
 	} else {
 		currentState.Disk = disk
